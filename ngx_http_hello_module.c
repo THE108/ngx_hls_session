@@ -87,6 +87,55 @@ ngx_module_t ngx_http_hello_module = {
     NULL,                          /* exit master */
     NGX_MODULE_V1_PADDING
 };
+
+static ngx_int_t
+add_chain_link(ngx_http_request_t *r, ngx_chain_t** chain, void *data, size_t len, 
+    ngx_str_t* param, size_t* content_length)
+{
+    ngx_buf_t   *b;
+    ngx_chain_t *tmp;
+    ngx_str_t    s;
+    size_t       total_len;
+
+    total_len = (param) ? len + param->len : len;
+    *content_length += total_len;
+
+    s.data = ngx_pcalloc(r->pool, total_len); 
+    //  TODO: error check 
+    s.len = total_len;
+    ngx_memcpy(s.data, data, len);
+
+    if (param)
+        ngx_memcpy(s.data + len, param->data, param->len);
+
+    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, 
+        "str:'%V' len:%d", &s, s.len);
+
+    /* allocate a buffer for your response body */
+    b = ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
+    if (b == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    b->pos = s.data;
+    b->last = s.data + s.len;
+    b->memory = 1;    /* this buffer is in memory */
+
+    /* attach this buffer to the buffer chain */
+    tmp = ngx_alloc_chain_link(r->pool);
+    /* TODO: add error handling */
+
+    tmp->buf = b;
+    tmp->next = NULL;
+
+    if (*chain) {
+        (*chain)->next = tmp;
+    }
+
+    *chain = tmp;
+
+    return NGX_OK;
+}
  
 /*
  * Main handler function of the module. 
@@ -95,12 +144,10 @@ static ngx_int_t
 ngx_http_hello_handler(ngx_http_request_t *r)
 {
     ngx_int_t    rc;
-    ngx_buf_t   *b;
-    ngx_chain_t *out, *tmp, *first_out;
+    ngx_chain_t *head, *tail;
     u_char    *last, *addr, *p, *chain_start;
-    // off_t   begin, end, len;
     size_t    root, cl;
-    ngx_str_t path, dbg;
+    ngx_str_t path;
 
     u_char                     is_tag;
     ngx_uint_t                 level;
@@ -225,8 +272,7 @@ ngx_http_hello_handler(ngx_http_request_t *r)
 
     ngx_log_error(NGX_LOG_ERR, log, 0, "after mmap");
 
-    out = NULL;
-    first_out = NULL;
+    head = tail = NULL;
     p = addr;
     chain_start = addr;
     cl = 0;
@@ -252,41 +298,46 @@ ngx_http_hello_handler(ngx_http_request_t *r)
                 // ngx_log_error(NGX_LOG_ERR, log, 0, "IS TAG");
             }
 
-            tmp = ngx_alloc_chain_link(r->pool);
-            if (out) {
-                out->next = tmp;
-            } else {
-                first_out = tmp;
+            rc = add_chain_link(r, &tail, chain_start, p - chain_start, 
+                &hello_string, &cl);
+
+            if (!head) {
+                head = tail;
             }
 
-            out = tmp;
+            // tmp = ngx_alloc_chain_link(r->pool);
+            // if (out) {
+            //     out->next = tmp;
+            // } else {
+            //     first_out = tmp;
+            // }
 
-            /* allocate a buffer for your response body */
-            b = ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
-            if (b == NULL) {
-                return NGX_HTTP_INTERNAL_SERVER_ERROR;
-            }
+            // out = tmp;
 
-            dbg.data = ngx_pcalloc(r->pool, (p - chain_start) + hello_string.len); //  TODO: error check 
-            dbg.len = (p - chain_start) + hello_string.len;
-            ngx_memcpy(dbg.data, chain_start, p - chain_start);
-            ngx_memcpy(dbg.data + (p - chain_start), hello_string.data, hello_string.len);
+            // /* allocate a buffer for your response body */
+            // b = ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
+            // if (b == NULL) {
+            //     return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            // }
 
-            ngx_log_error(NGX_LOG_ERR, log, 0, "str:'%V' len:%d", 
-                &dbg, dbg.len);
+            // dbg.data = ngx_pcalloc(r->pool, (p - chain_start) + hello_string.len); 
+            // //  TODO: error check 
+            // dbg.len = (p - chain_start) + hello_string.len;
+            // ngx_memcpy(dbg.data, chain_start, p - chain_start);
+            // ngx_memcpy(dbg.data + (p - chain_start), hello_string.data, hello_string.len);
 
-            b->pos = dbg.data;
-            b->last = dbg.data + dbg.len;
-            b->memory = 1;    /* this buffer is in memory */
+            // ngx_log_error(NGX_LOG_ERR, log, 0, "str:'%V' len:%d", 
+            //     &dbg, dbg.len);
 
-            cl += dbg.len;
+            // b->pos = dbg.data;
+            // b->last = dbg.data + dbg.len;
+            // b->memory = 1;    /* this buffer is in memory */
 
-            // ngx_memcpy(b->pos, chain_start, p - chain_start);
-            // ngx_memcpy(b->pos + (p - chain_start), hello_string.data, hello_string.len);
+            // cl += dbg.len;
 
-            /* attach this buffer to the buffer chain */
-            out->buf = b;
-            out->next = NULL;
+            // /* attach this buffer to the buffer chain */
+            // out->buf = b;
+            // out->next = NULL;
 
             chain_start = p;
             is_tag = 0;
@@ -295,18 +346,20 @@ ngx_http_hello_handler(ngx_http_request_t *r)
         p++;
     }
 
+    if (is_tag) {
+        rc = add_chain_link(r, &tail, chain_start, p - chain_start, 
+                            &hello_string, &cl);
+    } else {
+        rc = add_chain_link(r, &tail, chain_start, p - chain_start, 
+                            NULL, &cl);
+    }
+
     ngx_log_error(NGX_LOG_ERR, log, 0, "after while");
 
-    if (out) {
-
-        ngx_log_error(NGX_LOG_ERR, log, 0, "after while 1");
-        /* this is the last buffer in the buffer chain */
-        out->buf->last_buf = 1;
-        out->buf->last_in_chain = 1;
-
-        ngx_log_error(NGX_LOG_ERR, log, 0, "after while 2");
-    } else {
-        ngx_log_error(NGX_LOG_ERR, log, 0, "out chain is null");
+    /* this is the last buffer in the buffer chain */
+    if (tail) {
+        tail->buf->last_buf = 1;
+        tail->buf->last_in_chain = 1;
     }
 
     ngx_log_error(NGX_LOG_ERR, log, 0, "before munmap:%d", of.size);
@@ -341,7 +394,7 @@ ngx_http_hello_handler(ngx_http_request_t *r)
     //     first_out->buf->last_buf, first_out->buf->last_in_chain, first_out->next);
  
     /* send the buffer chain of your response */
-    return ngx_http_output_filter(r, first_out);
+    return ngx_http_output_filter(r, head);
 }
  
 /*
