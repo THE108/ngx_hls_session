@@ -136,6 +136,52 @@ add_chain_link(ngx_http_request_t *r, ngx_chain_t** chain, void *data, size_t le
 
     return NGX_OK;
 }
+
+static ngx_int_t
+get_tocken(ngx_http_request_t *r, ngx_str_t* s)
+{
+    u_char *pos, *start;
+    size_t  size;
+
+    if (!r->args.data) {
+        return 0;
+    }
+
+    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "1.args:%V hello:%V", 
+        &(r->args), &hello_string);
+   
+    start = pos = ngx_strlcasestrn(r->args.data, r->args.data + r->args.len, 
+        hello_string.data, hello_string.len - 1);
+
+    if (!pos) {
+        return 0;
+    }
+
+    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "2.args:%V", &(r->args));
+
+    pos += hello_string.len;
+    if (*pos++ != '=') {
+        return 0;
+    }
+
+    while (pos < r->args.data + r->args.len) {
+        if (*pos == '&') {
+            break;
+        }
+        ++pos;
+    }
+
+    size = pos - start + 1;
+
+    s->data = ngx_pcalloc(r->pool, size); 
+    //  TODO: error check 
+    s->len = size;
+
+    s->data[0] = '?';
+    ngx_memcpy(s->data+1, start, size-1);
+
+    return 1;
+}
  
 /*
  * Main handler function of the module. 
@@ -147,7 +193,7 @@ ngx_http_hello_handler(ngx_http_request_t *r)
     ngx_chain_t *head, *tail;
     u_char    *last, *addr, *p, *chain_start;
     size_t    root, cl;
-    ngx_str_t path;
+    ngx_str_t path, tocken;
 
     u_char                     is_tag;
     ngx_uint_t                 level;
@@ -179,19 +225,11 @@ ngx_http_hello_handler(ngx_http_request_t *r)
 
     path.len = last - path.data;
 
-    ngx_log_error(NGX_LOG_ERR, log, 0, "playlist filename: \"%V\"", &path);
+    ngx_log_error(NGX_LOG_ERR, log, 0, "playlist filename:%V", &path);
  
     /* set the 'Content-type' header */
     r->headers_out.content_type.len = sizeof(m3u8_content_type) - 1;
     r->headers_out.content_type.data = m3u8_content_type;
- 
-    /* send the header only, if the request type is http 'HEAD' */
-    if (r->method == NGX_HTTP_HEAD) {
-        r->headers_out.status = NGX_HTTP_OK;
-        r->headers_out.content_length_n = path.len;
- 
-        return ngx_http_send_header(r);
-    }
 
     /* get core module config */
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
@@ -253,7 +291,12 @@ ngx_http_hello_handler(ngx_http_request_t *r)
 
     r->root_tested = !r->error_page;
 
-    ngx_log_error(NGX_LOG_ERR, log, 0, "before mmap");
+    if (!get_tocken(r, &tocken)) {
+        ngx_log_error(NGX_LOG_ERR, log, 0, "tocken not found");
+        return NGX_DECLINED;
+    }
+
+    ngx_log_error(NGX_LOG_ERR, log, 0, "args:%V", &(r->args));
 
     /* mmap playlist file */
     addr = mmap(NULL, of.size, PROT_READ, MAP_SHARED, of.fd, 0);
@@ -273,12 +316,35 @@ ngx_http_hello_handler(ngx_http_request_t *r)
     ngx_log_error(NGX_LOG_ERR, log, 0, "after mmap");
 
     head = tail = NULL;
-    p = addr;
-    chain_start = addr;
-    cl = 0;
-    is_tag = 0;
+    p = chain_start = addr;
+    cl = is_tag = 0;
     
     while (p < addr + of.size) {
+
+        // switch (*p) {
+        // case '#':
+        //     is_tag = 1;
+        //     ++p;
+        //     break;
+
+        // case '\r':
+        // case '\n':
+        //     /* eol */
+        //     if (is_tag) {
+        //         is_tag = 0;
+        //         ++p;
+        //     } else {
+        //         rc = add_chain_link(r, &tail, chain_start, p - chain_start, 
+        //             &hello_string, &cl);
+
+        //         if (!head) {
+        //             head = tail;
+        //         }
+
+        //         chain_start = p;
+        //         is_tag = 0;
+        //     }
+        // }
 
         if (*p == '#') {
             is_tag = 1;
@@ -299,45 +365,11 @@ ngx_http_hello_handler(ngx_http_request_t *r)
             }
 
             rc = add_chain_link(r, &tail, chain_start, p - chain_start, 
-                &hello_string, &cl);
+                &tocken, &cl);
 
             if (!head) {
                 head = tail;
             }
-
-            // tmp = ngx_alloc_chain_link(r->pool);
-            // if (out) {
-            //     out->next = tmp;
-            // } else {
-            //     first_out = tmp;
-            // }
-
-            // out = tmp;
-
-            // /* allocate a buffer for your response body */
-            // b = ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
-            // if (b == NULL) {
-            //     return NGX_HTTP_INTERNAL_SERVER_ERROR;
-            // }
-
-            // dbg.data = ngx_pcalloc(r->pool, (p - chain_start) + hello_string.len); 
-            // //  TODO: error check 
-            // dbg.len = (p - chain_start) + hello_string.len;
-            // ngx_memcpy(dbg.data, chain_start, p - chain_start);
-            // ngx_memcpy(dbg.data + (p - chain_start), hello_string.data, hello_string.len);
-
-            // ngx_log_error(NGX_LOG_ERR, log, 0, "str:'%V' len:%d", 
-            //     &dbg, dbg.len);
-
-            // b->pos = dbg.data;
-            // b->last = dbg.data + dbg.len;
-            // b->memory = 1;    /* this buffer is in memory */
-
-            // cl += dbg.len;
-
-            // /* attach this buffer to the buffer chain */
-            // out->buf = b;
-            // out->next = NULL;
 
             chain_start = p;
             is_tag = 0;
@@ -346,15 +378,8 @@ ngx_http_hello_handler(ngx_http_request_t *r)
         p++;
     }
 
-    if (is_tag) {
-        rc = add_chain_link(r, &tail, chain_start, p - chain_start, 
-                            &hello_string, &cl);
-    } else {
-        rc = add_chain_link(r, &tail, chain_start, p - chain_start, 
-                            NULL, &cl);
-    }
-
-    ngx_log_error(NGX_LOG_ERR, log, 0, "after while");
+    rc = add_chain_link(r, &tail, chain_start, p - chain_start, 
+                        (is_tag) ? &tocken : NULL, &cl);
 
     /* this is the last buffer in the buffer chain */
     if (tail) {
@@ -368,30 +393,17 @@ ngx_http_hello_handler(ngx_http_request_t *r)
         ngx_log_error(NGX_LOG_ERR, log, 0, "munmap failed:%d", of.size);
     }
 
-    ngx_log_error(NGX_LOG_ERR, log, 0, "after munmap");
-
-    // ngx_close_file(of.fd);
-
-    // ngx_log_error(NGX_LOG_ERR, log, 0, "after ngx_close_file");
- 
     /* set the status line*/
     r->headers_out.status = NGX_HTTP_OK;
     r->headers_out.content_length_n = cl;
 
-    ngx_log_error(NGX_LOG_ERR, log, 0, "before ngx_http_send_header");
- 
     /* send the headers of your response */
     rc = ngx_http_send_header(r);
 
-    ngx_log_error(NGX_LOG_ERR, log, 0, "after ngx_http_send_header");
- 
-    if (rc == NGX_ERROR || rc > NGX_OK || r->header_only) {
-        ngx_log_error(NGX_LOG_ERR, log, 0, "RETURN");
+    /* send the header only, if the request type is http 'HEAD' */
+    if (rc == NGX_ERROR || rc > NGX_OK || r->header_only || r->method == NGX_HTTP_HEAD) {
         return rc;
     }
-
-    // ngx_log_error(NGX_LOG_ERR, log, 0, "before ngx_http_output_filter:%d %d %d", 
-    //     first_out->buf->last_buf, first_out->buf->last_in_chain, first_out->next);
  
     /* send the buffer chain of your response */
     return ngx_http_output_filter(r, head);
@@ -409,7 +421,7 @@ ngx_http_hello(ngx_conf_t *cf, void *post, void *data)
     clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
     clcf->handler = ngx_http_hello_handler;
 
-    ngx_str_t  *name = data; // i.e., first field of ngx_http_hello_loc_conf_t
+    ngx_str_t *name = data; // i.e., first field of ngx_http_hello_loc_conf_t
     
     if (ngx_strcmp(name->data, "") == 0) {
         return NGX_CONF_ERROR;
